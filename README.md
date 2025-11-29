@@ -19,8 +19,6 @@ Start the program by calling `./build/rf-powermon`. Check the helptext `./build/
 In order of priorities:
 
 * implement sampling rate control and/or decimation
-* gitrev in CMake
 * export timeseries in some reusable format
 * allow control and data readout via sockets
 * debugging
-* CI
