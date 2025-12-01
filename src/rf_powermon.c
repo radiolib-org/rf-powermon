@@ -107,12 +107,24 @@ static void exithandler(void) {
   close(conf.socket_fd);
 }
 
+static void stats_reset() {
+  stats.min.dbm = 99; stats.min.abs_level = 1000;
+  stats.max.dbm = -99; stats.max.abs_level = 0;
+  stats.avg.dbm = 0; stats.avg.abs_level = 0;
+}
+
 static void process_socket_cmd(int fd, char* cmd) {
+  char buff[64] = { 0 };
   if(strstr(cmd, "read") == cmd) {
-    char buff[64] = { 0 };
-    sprintf(buff, "min=%.2fdBm, max=%.2fdBm, avg=%.2fdBm\n", (double)stats.min.dbm, (double)stats.max.dbm, (double)stats.avg.dbm);
-    socket_write(fd, buff);
+    sprintf(buff, "read: min=%.2fdBm, max=%.2fdBm, avg=%.2fdBm\n", (double)stats.min.dbm, (double)stats.max.dbm, (double)stats.avg.dbm);
+
+  } else if(strstr(cmd, "reset") == cmd) {
+    stats_reset();
+    sprintf(buff, "reset:ok\n");
+  
   }
+
+  socket_write(fd, buff);
 }
 
 static char* strchr_first(char* s, const char* delims) {

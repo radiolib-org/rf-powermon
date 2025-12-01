@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <errno.h>
+#include <sys/ioctl.h>
 
 int socket_setup(int port) {
   // set up the ingest socket
@@ -25,6 +26,9 @@ int socket_setup(int port) {
   
   // make the socket non-blocking
   fcntl(control_socket_fd, F_SETFL, fcntl(control_socket_fd, F_GETFL, 0) | O_NONBLOCK);
+  
+  int yes = 1;
+  setsockopt(control_socket_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
 
   // start listening
   if(listen(control_socket_fd, 10) != 0) {
@@ -42,10 +46,16 @@ int socket_read(int listen_fd, char* cmd_buff) {
     return(0);
   }
 
-  int n = 0;
-  while((n = read(cmd_conn_fd, cmd_buff, sizeof(cmd_buff) - 1)) > 0) {
-    cmd_buff[n] = '\0';
+  int len = 0;
+  do {
+    ioctl(cmd_conn_fd, FIONREAD, &len);
+  } while(!len);
+  len = recv(cmd_conn_fd, cmd_buff, sizeof(cmd_buff) - 1, 0);
+  if(len < 0) {
+    // something went wrong
+    return(0);
   }
+  cmd_buff[len] = '\0';
 
   // strip trailing newline if present
   if((strlen(cmd_buff) > 1) && (cmd_buff[strlen(cmd_buff) - 1] == '\n')) {
@@ -56,5 +66,5 @@ int socket_read(int listen_fd, char* cmd_buff) {
 }
 
 void socket_write(int socket, char* data) {
-  write(socket, data, strlen(data));
+  send(socket, data, strlen(data), 0);
 }
