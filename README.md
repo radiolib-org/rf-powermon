@@ -18,7 +18,7 @@ Start the program by calling `./build/rf-powermon`. Check the helptext `./build/
 
 In order of priorities:
 
+* get rid of lgpio dependency
 * implement sampling rate control and/or decimation
 * export timeseries in some reusable format
-* allow control and data readout via sockets
 * debugging

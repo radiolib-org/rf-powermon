@@ -8,6 +8,8 @@
 #include <lgpio.h>
 #include "argtable3/argtable3.h"
 
+#include "socket.h"
+
 #ifndef GITREV
 #define GITREV "unknown"
 #endif
@@ -21,10 +23,14 @@
 #define FREQ_DEFAULT          434
 #define ATTEN_DEFAULT         30.0
 #define WINDOW_DEFAULT        512
+#define CONTROL_DEFAULT       41122
 
 // buffer to save incoming data into
 #define BUFF_SIZE             4096
 static char rx_buff[BUFF_SIZE] = { 0 };
+
+// buffer for commands from socket
+static char socket_buff[256] = { 0 };
 
 // app configuration structure
 static struct conf_t {
@@ -33,14 +39,16 @@ static struct conf_t {
   int freq;
   float atten;
   int window;
-  int handle;
+  int serial_fd;
+  int socket_fd;
 } conf = {
   .port = PORT_DEFAULT,
   .speed = SPEED_DEFAULT,
   .freq = FREQ_DEFAULT,
   .atten = ATTEN_DEFAULT,
   .window = WINDOW_DEFAULT,
-  .handle = -1,
+  .serial_fd = -1,
+  .socket_fd = -1,
 };
 
 // units returned by the meter
@@ -58,13 +66,15 @@ struct sample_t {
   enum sample_abs_level_unit abs_unit;
 };
 
-// structure holdign information about the minimum and maximum
+// structure holding information about the minimum and maximum
 static struct stats_t {
   struct sample_t min;
   struct sample_t max;
+  struct sample_t avg;
 } stats = {
-  .min = { .dbm = 99,  .abs_level = 1000, .abs_unit = ABS_LEVEL_WATT },
-  .max = { .dbm = -99, .abs_level = 0,    .abs_unit = ABS_LEVEL_MICROWATT },
+  .min = { .dbm = 99,   .abs_level = 1000,  .abs_unit = ABS_LEVEL_WATT },
+  .max = { .dbm = -99,  .abs_level = 0,     .abs_unit = ABS_LEVEL_MICROWATT },
+  .avg = { .dbm = 0,    .abs_level = 0,     .abs_unit = ABS_LEVEL_MICROWATT },
 };
 
 // averaging window
@@ -78,6 +88,7 @@ static struct args_t {
   struct arg_int* freq;
   struct arg_dbl* atten;
   struct arg_int* window;
+  struct arg_int* control;
   struct arg_lit* help;
   struct arg_end* end;
 } args;
@@ -90,9 +101,18 @@ static void sighandler(int signal) {
 static void exithandler(void) {
   fprintf(stdout, "\n");
   fflush(stdout);
-  int ret = lgSerialClose(conf.handle);
+  int ret = lgSerialClose(conf.serial_fd);
   if(ret < 0) {
     fprintf(stderr, "ERROR: Failed to close COM port (%s)\n", lguErrorText(ret));
+  }
+  close(conf.socket_fd);
+}
+
+static void process_socket_cmd(int fd, char* cmd) {
+  if(strstr(cmd, "read") == cmd) {
+    char buff[64] = { 0 };
+    sprintf(buff, "min=%.2fdBm, max=%.2fdBm, avg=%.2fdBm\n", (double)stats.min.dbm, (double)stats.max.dbm, (double)stats.avg.dbm);
+    socket_write(fd, buff);
   }
 }
 
@@ -126,7 +146,7 @@ static char* strchr_first(char* s, const char* delims) {
 
 static void parse_sample(char* sample_str, struct sample_t* sample) {
   if(!sample_str || (strlen(sample_str) != 10)) {
-    fprintf(stderr, "Invalid sample: %s\n", sample_str);
+    //fprintf(stderr, "Invalid sample: %s\n", sample_str);
     return;
   }
 
@@ -180,11 +200,11 @@ static void process_rx(char* data, int len) {
 
     // calculate the average
     *avg_ptr = sample.dbm;
-    float avg = 0;
+    stats.avg.dbm = 0;
     for(int i = 0; i < conf.window; i++) {
-      avg += avg_window[i];
+      stats.avg.dbm += avg_window[i];
     }
-    avg /= conf.window;
+    stats.avg.dbm /= conf.window;
     avg_ptr++;
     if((avg_ptr - avg_window) > conf.window) {
       avg_ptr = avg_window;
@@ -197,7 +217,7 @@ static void process_rx(char* data, int len) {
       sample.abs_unit,
       (double)stats.min.dbm,
       (double)stats.max.dbm,
-      (double)avg);
+      (double)stats.avg.dbm);
     fflush(stdout);
 
     // clear the buffer and advance pointer
@@ -214,14 +234,14 @@ static int set_config(int handle, int freq, float atten) {
 
 static int run() {
   // open the port
-  conf.handle = lgSerialOpen(conf.port, conf.speed, 0);
-  if(conf.handle < 0) {
-    fprintf(stderr, "ERROR: Failed to open COM port (%s)\n", lguErrorText(conf.handle));
-    return(conf.handle);
+  conf.serial_fd = lgSerialOpen(conf.port, conf.speed, 0);
+  if(conf.serial_fd < 0) {
+    fprintf(stderr, "ERROR: Failed to open COM port (%s)\n", lguErrorText(conf.serial_fd));
+    return(conf.serial_fd);
   }
 
   // send the configuration
-  int ret = set_config(conf.handle, conf.freq, conf.atten);
+  int ret = set_config(conf.serial_fd, conf.freq, conf.atten);
   if(ret != 0) {
     return(ret);
   }
@@ -229,15 +249,16 @@ static int run() {
   // counters
   int av_count = 0;
   int rx_count = 0;
+  int read_socket_fd = 0;
   fprintf(stdout, " Relative   Absolute    Minimum    Maximum     Average\n");
 
   // run until killed by the user
   for(;;) {
     // check how many bytes are available
-    av_count = lgSerialDataAvailable(conf.handle);
+    av_count = lgSerialDataAvailable(conf.serial_fd);
     while(av_count) {
       // read up to the buffer size
-      rx_count = lgSerialRead(conf.handle, rx_buff, av_count > BUFF_SIZE ? BUFF_SIZE : av_count);
+      rx_count = lgSerialRead(conf.serial_fd, rx_buff, av_count > BUFF_SIZE ? BUFF_SIZE : av_count);
       //fprintf(stdout, "read %d: %s\n", rx_count, rx_buff);
 
       process_rx(rx_buff, rx_count);
@@ -245,6 +266,16 @@ static int run() {
       // clear the buffer
       memset(rx_buff, 0, BUFF_SIZE);
       av_count -= rx_count;
+    }
+
+    // check if there is something to read from the socket
+    read_socket_fd = socket_read(conf.socket_fd, socket_buff);
+    if(read_socket_fd > 0) {
+      // got something, process it
+      process_socket_cmd(read_socket_fd, socket_buff);
+
+      // close the socket now, we're done with it
+      close(read_socket_fd);
     }
     
     // some small sleep to stop the thread for a bit
@@ -256,11 +287,12 @@ static int run() {
 
 int main(int argc, char** argv) {
   void *argtable[] = {
-    args.port = arg_str0("p", "port", NULL, "Which port to use, defaults to" STR(PORT_DEFAULT)),
+    args.port = arg_str0("p", "port", NULL, "Which serial port to use, defaults to" STR(PORT_DEFAULT)),
     args.speed = arg_int0("s", "speed", "baud", "Port speed, defaults to " STR(SPEED_DEFAULT)),
     args.freq = arg_int0("f", "frequency", "MHz", "Frequency to set, defaults to " STR(FREQ_DEFAULT)),
     args.atten = arg_dbl0("a", "attenuation", "dB", "Attenuation to set, defaults to " STR(ATTEN_DEFAULT)),
     args.window = arg_int0("w", "window", NULL, "Averaging window length, defaults to " STR(WINDOW_DEFAULT)),
+    args.control = arg_int0("c", "control", "port", "Control port for socket connection, defaults to " STR(CONTROL_DEFAULT)),
     args.help = arg_lit0(NULL, "help", "Display this help and exit"),
     args.end = arg_end(2),
   };
@@ -284,7 +316,6 @@ int main(int argc, char** argv) {
   }
 
   if(nerrors > 0) {
-    /* Display the error details contained in the arg_end struct.*/
     arg_print_errors(stdout, args.end, argv[0]);
     fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
     exitcode = 1;
@@ -299,6 +330,11 @@ int main(int argc, char** argv) {
   if(args.freq->count) { conf.freq = args.freq->ival[0]; }
   if(args.atten->count) { conf.atten = args.atten->dval[0]; }
   if(args.window->count) { conf.window = args.window->ival[0]; }
+
+  // set up the socket
+  int socket_port = CONTROL_DEFAULT;
+  if(args.control->count) { socket_port = args.control->ival[0]; };
+  conf.socket_fd = socket_setup(socket_port);
 
   exitcode = run();
 
