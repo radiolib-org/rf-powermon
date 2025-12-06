@@ -115,6 +115,27 @@ static void stats_reset() {
   stats.avg.dbm = 0; stats.avg.abs_level = 0;
 }
 
+static void stats_update(struct sample_t* sample) {
+  // update statistics
+  if(sample->dbm < stats.min.dbm) {
+    stats.min.dbm = sample->dbm;
+  } else if(sample->dbm > stats.max.dbm) {
+    stats.max.dbm = sample->dbm;
+  }
+
+  // calculate the average
+  *avg_ptr = sample->dbm;
+  stats.avg.dbm = 0;
+  for(int i = 0; i < conf.window; i++) {
+    stats.avg.dbm += avg_window[i];
+  }
+  stats.avg.dbm /= conf.window;
+  avg_ptr++;
+  if((avg_ptr - avg_window) > conf.window) {
+    avg_ptr = avg_window;
+  }
+}
+
 static void process_socket_cmd(int fd, char* cmd) {
   char buff[64] = { 0 };
   if(strstr(cmd, RF_POWERMON_CMD_READ_POWER) == cmd) {
@@ -216,23 +237,7 @@ static void process_rx(char* data, int len) {
     parse_sample(buff, &sample);
 
     // update statistics
-    if(sample.dbm < stats.min.dbm) {
-      stats.min.dbm = sample.dbm;
-    } else if(sample.dbm > stats.max.dbm) {
-      stats.max.dbm = sample.dbm;
-    }
-
-    // calculate the average
-    *avg_ptr = sample.dbm;
-    stats.avg.dbm = 0;
-    for(int i = 0; i < conf.window; i++) {
-      stats.avg.dbm += avg_window[i];
-    }
-    stats.avg.dbm /= conf.window;
-    avg_ptr++;
-    if((avg_ptr - avg_window) > conf.window) {
-      avg_ptr = avg_window;
-    }
+    stats_update(&sample);
 
     // print the result
     fprintf(stdout, " %5.1f dBm  %6.2f %c    %5.1f dBm  %5.1f dBm  %5.1f dBm\r", 
