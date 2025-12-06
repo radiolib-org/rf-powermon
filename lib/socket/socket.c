@@ -57,11 +57,6 @@ int socket_read(int listen_fd, char* cmd_buff) {
   }
   cmd_buff[len] = '\0';
 
-  // strip trailing newline if present
-  if((strlen(cmd_buff) > 1) && (cmd_buff[strlen(cmd_buff) - 1] == '\n')) {
-    cmd_buff[strlen(cmd_buff) - 1] = '\0';
-  }
-
   return(cmd_conn_fd);
 }
 
